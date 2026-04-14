@@ -3,7 +3,8 @@
 import { useEditorStore } from "@/stores/editor-store";
 import { EDITOR_FONTS, OVERLAY_TYPES, PATTERN_TYPES, HIGHLIGHT_COLORS } from "@/lib/editor/slide-defaults";
 import { Accordion } from "@/components/ui/accordion";
-import { Sparkles, Download, Save } from "lucide-react";
+import { Sparkles, Download, Save, Rocket } from "lucide-react";
+import { PublishModal } from "@/components/editor/publish/publish-modal";
 import { Button } from "@/components/ui/button";
 import { useExport } from "@/hooks/use-export";
 import { useState } from "react";
@@ -15,6 +16,7 @@ export function ControlsPanel() {
   const { slides, activeSlideIndex, updateSlide, updateSlideDeep, pushHistory } = useEditorStore();
   const { exportAll, exportSingle, exporting } = useExport();
   const [captionModal, setCaptionModal] = useState(false);
+  const [publishModal, setPublishModal] = useState(false);
   const slide = slides[activeSlideIndex];
 
   if (!slide) return null;
@@ -308,10 +310,17 @@ export function ControlsPanel() {
             <Download size={13} className="mr-1" /> Baixar Todos
           </Button>
         </div>
-        <Button size="sm" variant="ghost" className="w-full" onClick={() => setCaptionModal(true)}>
-          <Sparkles size={13} className="mr-1.5" /> Gerar Legenda
-        </Button>
+        <div className="grid grid-cols-2 gap-1.5">
+          <Button size="sm" variant="ghost" className="w-full" onClick={() => setCaptionModal(true)}>
+            <Sparkles size={13} className="mr-1" /> Legenda
+          </Button>
+          <Button size="sm" className="w-full bg-green-600 hover:bg-green-700 text-white" onClick={() => setPublishModal(true)}>
+            <Rocket size={13} className="mr-1" /> Publicar
+          </Button>
+        </div>
       </div>
+
+      <PublishModal open={publishModal} onClose={() => setPublishModal(false)} />
     </div>
   );
 }

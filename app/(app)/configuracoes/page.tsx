@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useAuth } from "@/components/providers/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -19,7 +19,7 @@ const IMAGE_MODELS = [
 export default function ConfiguracoesPage() {
   const { user, settings, signOut, refreshSettings } = useAuth();
   const { toast } = useToast();
-  const [tab, setTab] = useState<"perfil" | "api">("perfil");
+  const [tab, setTab] = useState<"perfil" | "api" | "social">("perfil");
   const [displayName, setDisplayName] = useState(settings?.display_name || "");
   const [apiKey, setApiKey] = useState(settings?.gemini_api_key || "");
   const [showKey, setShowKey] = useState(false);
@@ -102,6 +102,12 @@ export default function ConfiguracoesPage() {
           className={`px-4 py-2 rounded-lg text-sm cursor-pointer ${tab === "api" ? "bg-bg-surface-2 text-text-primary" : "text-text-secondary"}`}
         >
           API & IA
+        </button>
+        <button
+          onClick={() => setTab("social")}
+          className={`px-4 py-2 rounded-lg text-sm cursor-pointer ${tab === "social" ? "bg-bg-surface-2 text-text-primary" : "text-text-secondary"}`}
+        >
+          Redes Sociais
         </button>
       </div>
 
@@ -198,6 +204,127 @@ export default function ConfiguracoesPage() {
           </Card>
         </div>
       )}
+      {tab === "social" && <SocialTab />}
+    </div>
+  );
+}
+
+function SocialTab() {
+  const [connections, setConnections] = useState<Array<{ id: string; platform: string; platform_username: string | null; connected_at: string }>>([]);
+  const [connectingPlatform, setConnectingPlatform] = useState<string | null>(null);
+  const [username, setUsername] = useState("");
+  const { toast } = useToast();
+
+  useEffect(() => {
+    loadConnections();
+  }, []);
+
+  function loadConnections() {
+    try {
+      const raw = localStorage.getItem("app_social_connections");
+      setConnections(raw ? JSON.parse(raw) : []);
+    } catch {
+      setConnections([]);
+    }
+  }
+
+  const platforms = [
+    { id: "instagram", name: "Instagram", desc: "Publique carrosseis diretamente no Instagram", phase: "Disponivel" },
+    { id: "threads", name: "Threads", desc: "Publique carrosseis no Threads", phase: "Disponivel" },
+    { id: "facebook", name: "Facebook Pages", desc: "Publique como album na sua Page", phase: "Em breve" },
+    { id: "twitter", name: "X / Twitter", desc: "Publique como thread ou post multi-imagem", phase: "Em breve" },
+  ];
+
+  function handleConnect(platform: string) {
+    if (!username.trim()) return;
+    // Simulate OAuth - in production this would redirect to Meta/Twitter OAuth
+    const connection = {
+      id: `sc-${Date.now()}`,
+      user_id: JSON.parse(localStorage.getItem("app_session") || "{}").user_id || "local",
+      platform,
+      platform_user_id: `pid-${Date.now()}`,
+      platform_username: username.trim(),
+      access_token: `fake-token-${Date.now()}`,
+      refresh_token: null,
+      token_expires_at: new Date(Date.now() + 60 * 86400000).toISOString(),
+      scopes: ["publish", "read"],
+      connected_at: new Date().toISOString(),
+    };
+    const all = [...connections.filter((c) => c.platform !== platform), connection];
+    localStorage.setItem("app_social_connections", JSON.stringify(all));
+    setConnections(all);
+    setConnectingPlatform(null);
+    setUsername("");
+    toast(`${platform} conectado`, "success");
+  }
+
+  function handleDisconnect(id: string) {
+    const all = connections.filter((c) => c.id !== id);
+    localStorage.setItem("app_social_connections", JSON.stringify(all));
+    setConnections(all);
+    toast("Rede desconectada", "success");
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card className="p-5">
+        <h3 className="font-semibold text-sm mb-1">Redes Sociais</h3>
+        <p className="text-xs text-text-secondary mb-4">Conecte suas contas para publicar carrosseis diretamente do editor.</p>
+
+        <div className="space-y-3">
+          {platforms.map((p) => {
+            const conn = connections.find((c) => c.platform === p.id);
+            return (
+              <div key={p.id} className="flex items-center justify-between p-3 bg-bg-surface-2 rounded-lg border border-border-subtle">
+                <div className="flex items-center gap-3">
+                  <div className={`w-2 h-2 rounded-full ${conn ? "bg-green-400" : "bg-text-secondary/30"}`} />
+                  <div>
+                    <span className="text-sm font-medium">{p.name}</span>
+                    {conn ? (
+                      <span className="text-xs text-green-400 ml-2">@{conn.platform_username}</span>
+                    ) : (
+                      <span className="text-xs text-text-secondary ml-2">{p.desc}</span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {p.phase === "Em breve" && !conn ? (
+                    <span className="text-[10px] bg-bg-surface-3 text-text-secondary px-2 py-1 rounded-full">Em breve</span>
+                  ) : conn ? (
+                    <button onClick={() => handleDisconnect(conn.id)} className="text-xs text-red-400 hover:text-red-300 cursor-pointer">Desconectar</button>
+                  ) : connectingPlatform === p.id ? (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleConnect(p.id)}
+                        placeholder="@usuario"
+                        className="w-28 bg-bg-surface-3 border border-border-default rounded px-2 py-1 text-xs text-text-primary"
+                        autoFocus
+                      />
+                      <Button size="sm" onClick={() => handleConnect(p.id)}>OK</Button>
+                      <button onClick={() => setConnectingPlatform(null)} className="text-xs text-text-secondary cursor-pointer">X</button>
+                    </div>
+                  ) : (
+                    <Button size="sm" variant="secondary" onClick={() => { setConnectingPlatform(p.id); setUsername(""); }}>Conectar</Button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      <Card className="p-5">
+        <h3 className="font-semibold text-sm mb-1">Como funciona</h3>
+        <div className="space-y-2 text-xs text-text-secondary">
+          <p>1. Conecte suas redes sociais acima (OAuth seguro)</p>
+          <p>2. No editor, clique em "Publicar" no rodape</p>
+          <p>3. Selecione as redes, edite a legenda e escolha publicar agora ou agendar</p>
+          <p>4. As imagens sao exportadas e publicadas automaticamente</p>
+        </div>
+      </Card>
     </div>
   );
 }

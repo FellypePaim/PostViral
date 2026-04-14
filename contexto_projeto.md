@@ -386,3 +386,255 @@ npm run lint     # ESLint
 - 13 fontes no editor
 - 9 secoes de controle no editor
 - Build passando 100%
+
+---
+
+## Feature: Publicacao e Agendamento em Redes Sociais
+
+### Visao Geral
+
+Permitir que o usuario publique carrosseis diretamente nas redes sociais a partir do editor, com opcao de agendar para data/hora futura. O fluxo: usuario finaliza o carrossel -> clica "Publicar" -> seleciona redes, edita legenda, escolhe "Agora" ou "Agendar" -> confirma.
+
+### Plataformas e Viabilidade
+
+| Plataforma | Carrossel | Publicacao | Agendamento | Custo API | Fase |
+|------------|-----------|------------|-------------|-----------|------|
+| Instagram | Sim (ate 10 imgs) | Sim | Nativo (`scheduled_publish_time`) | Gratis | 1 |
+| Threads | Sim (containers) | Sim | Suportado | Gratis | 1 |
+| Facebook Pages | Sim (album) | Sim | Nativo (`scheduled_publish_time`) | Gratis | 2 |
+| X/Twitter | Thread ou 4 imgs | Sim | Backend (cron) | $100+/mes | 3 |
+
+### Requisitos Tecnicos por Plataforma
+
+**Instagram (Meta Graph API)**
+- Conta profissional (Creator ou Business) obrigatoria
+- Auth: OAuth 2.0 via Meta Login - usuario conecta uma vez, token salvo
+- Fluxo carrossel: `POST /{ig_id}/media` (cria container por imagem) -> `POST /{ig_id}/media_publish`
+- Agendamento: parametro `scheduled_publish_time` no publish
+- Imagens precisam estar em URL publica no momento da publicacao
+- Limite: 100 posts/24h por conta (carrossel = 1 post)
+
+**Threads (Threads API - Meta)**
+- Auth OAuth separado do Instagram, mas mesma plataforma Meta
+- Fluxo carrossel: cria containers individuais -> container de carrossel -> publish
+- Endpoints: `POST /{threads-user-id}/threads` + `/threads_publish`
+- Limite: 250 posts/24h
+
+**Facebook Pages (Pages API)**
+- Precisa de Facebook Page (nao perfil pessoal)
+- Permissoes: `pages_manage_posts`, `pages_read_engagement`
+- Post com multiplas imagens via upload multiplo
+- Agendamento: min 10 min, max 30 dias no futuro
+- Auth: OAuth 2.0 via Facebook Login (compartilha fluxo Meta)
+
+**X/Twitter (X API v2)**
+- Upload de midia primeiro -> referencia `media_id` no tweet
+- Sem carrossel nativo - equivale a thread ou post com ate 4 imagens
+- Sem agendamento nativo na API - precisa scheduler no backend
+- Custo: Free tier so leitura. Basic $100/mes (100 posts/mes). Pro $5000/mes
+- Modelo: usuario fornece propria API key (como Gemini) ou cobrar como add-on premium
+
+### Requisito Critico: Hospedagem de Imagens
+
+A API da Meta faz cURL da imagem pelo link. As imagens exportadas precisam estar em URL publica temporaria no momento da publicacao. Opcoes:
+- Supabase Storage (ja integrado)
+- Cloudflare R2 (mais barato para volume)
+- AWS S3 com presigned URLs
+- Vercel Blob (se migrar para Vercel)
+
+### Arquitetura da Feature
+
+**1. Nova secao em Configuracoes > Redes Sociais:**
+```
+[ Instagram ]  ● Conectado como @seuperfil   [Desconectar]
+[ Facebook  ]  ○ Nao conectado               [Conectar]
+[ Threads   ]  ● Conectado como @seuperfil   [Desconectar]
+[ X/Twitter ]  ○ Nao conectado               [Conectar + Chave API]
+```
+
+**2. Novo botao no rodape do editor:**
+```
+[Baixar Slide N] [Salvar] [Baixar Todos] [Gerar Legenda] [Publicar]
+```
+
+**3. Modal "Publicar / Agendar":**
+- Checkboxes das redes conectadas
+- Textarea com legenda pre-gerada pela IA
+- Radio: "Agora" ou "Agendar para [date/time picker]"
+- Botao confirmar
+
+**4. Tabelas novas no banco:**
+```sql
+-- Conexoes de redes sociais do usuario
+CREATE TABLE social_connections (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES auth.users(id) NOT NULL,
+  platform TEXT NOT NULL,           -- 'instagram' | 'threads' | 'facebook' | 'twitter'
+  platform_user_id TEXT NOT NULL,
+  platform_username TEXT,
+  access_token TEXT NOT NULL,       -- encrypted
+  refresh_token TEXT,
+  token_expires_at TIMESTAMPTZ,
+  scopes TEXT[],
+  connected_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Posts agendados/publicados
+CREATE TABLE scheduled_posts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES auth.users(id) NOT NULL,
+  carousel_id UUID REFERENCES carousels(id) NOT NULL,
+  platforms TEXT[] NOT NULL,         -- ['instagram', 'threads']
+  caption TEXT,
+  scheduled_for TIMESTAMPTZ,        -- null = publicar agora
+  status TEXT DEFAULT 'pending',    -- 'pending' | 'publishing' | 'published' | 'failed'
+  publish_results JSONB,            -- resultado por plataforma
+  image_urls TEXT[],                -- URLs publicas das imagens
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  published_at TIMESTAMPTZ
+);
+```
+
+**5. API Routes novas:**
+```
+POST /api/social/connect         -- Inicia OAuth flow
+GET  /api/social/callback        -- OAuth callback
+GET  /api/social/connections      -- Lista conexoes do usuario
+DELETE /api/social/connections/[id] -- Desconectar
+POST /api/social/publish          -- Publicar agora
+POST /api/social/schedule         -- Agendar publicacao
+GET  /api/social/scheduled        -- Lista posts agendados
+```
+
+**6. Fluxo de publicacao (backend):**
+1. Exportar slides como imagens (server-side ou receber do client)
+2. Upload imagens para storage com URL publica
+3. Para cada plataforma selecionada:
+   - Criar containers de midia (Instagram/Threads)
+   - Criar post com caption + midia
+   - Se agendado: incluir `scheduled_publish_time`
+4. Salvar resultado em `scheduled_posts`
+5. Se agendamento via backend (Twitter): cron job verifica posts pendentes
+
+### Fases de Implementacao
+
+**Fase 1 - Instagram + Threads (prioridade)**
+- OAuth Meta Login (compartilhado)
+- Upload imagens para URL publica
+- Publicacao de carrossel no Instagram
+- Publicacao de carrossel no Threads
+- Agendamento nativo via API
+- UI: secao Redes Sociais + modal Publicar
+
+**Fase 2 - Facebook Pages**
+- Adicionar Facebook ao OAuth Meta existente
+- Publicacao como album de fotos
+- Agendamento nativo
+
+**Fase 3 - X/Twitter (opcional/premium)**
+- Input de API key do usuario (modelo Gemini)
+- Publicacao como thread ou post multi-imagem
+- Scheduler backend com cron job
+- Cobrar como add-on do plano
+
+### Dependencias
+
+- Supabase Storage ou outro storage com URLs publicas (necessario antes de qualquer integracao)
+- Meta Developer App registrado (Instagram + Threads + Facebook)
+- Dominio verificado para OAuth redirect URLs
+
+---
+
+## Proximo Passo: Migracao para Dados Reais (Supabase + Gemini)
+
+> Status: PLANEJADO, aguardando execucao. Usuario tem Supabase + Gemini key prontos. Social fica simulado.
+
+### Diagnostico Atual
+
+O app inteiro roda em localStorage. Todas as 15 API routes ja estao prontas e importam Supabase server client - so nao sao usadas pelo front. Alem disso, 5 botoes de IA no editor sao placeholders sem onClick handler.
+
+| Camada | Estado Atual | Estado Alvo |
+|--------|-------------|-------------|
+| Auth (login/register) | localStorage (`local-auth.ts`) | Supabase Auth |
+| Middleware | Checa cookie `local_auth` | Checa Supabase session via `getUser()` |
+| AuthProvider | Lê localStorage | Usa `supabase.auth.getSession()` + `onAuthStateChange` |
+| Carousels CRUD | `local-storage-db.ts` | `authFetch` -> `/api/carousels` |
+| Collections CRUD | `local-storage-db.ts` | `authFetch` -> `/api/collections` |
+| Auto-save | `updateCarouselLocal()` | `authFetch` -> PUT `/api/carousels/{id}` |
+| Editor load | `getCarousel()` localStorage | `authFetch` -> GET `/api/carousels/{id}` |
+| Gerar slides (IA) | Placeholder sem onClick | POST `/api/generate` action `generate-slide` |
+| Melhorar conteudo (IA) | Placeholder sem onClick | POST `/api/generate` action `improve` |
+| Gerar imagem (IA) | Placeholder sem onClick | POST `/api/generate-image` |
+| Refinar slide (IA) | Placeholder sem onClick | POST `/api/generate` action `refine` |
+| Gerar conteudo slide (IA) | Placeholder sem onClick | POST `/api/generate` action `generate-slide` |
+| Gerar legenda | `setCaptionModal(true)` mas modal nao existe | Novo `caption-modal.tsx` com POST `/api/generate` action `custom` |
+| Upload imagem | Div placeholder "clique ou arraste" | Real file input + POST `/api/upload-image` |
+| Wizard "Criar com IA" | Gera slides hardcoded locais | Loop de POST `/api/generate` para cada slide |
+
+### Plano de Execucao (7 etapas)
+
+**Etapa 1: Configurar Supabase**
+- Colocar credenciais reais no `.env.local`
+- Executar SQLs das 6 tabelas + RLS no Supabase Dashboard
+- Criar bucket `images` no Supabase Storage
+
+**Etapa 2: Migrar Auth**
+- `lib/supabase/middleware.ts` -> voltar `createServerClient` + `getUser()`
+- `components/providers/auth-provider.tsx` -> voltar Supabase client + `onAuthStateChange`
+- `app/(auth)/login/page.tsx` -> `supabase.auth.signInWithPassword()`
+- `app/(auth)/register/page.tsx` -> `supabase.auth.signUp()` + criar `user_settings`
+
+**Etapa 3: Migrar Dados**
+- `hooks/use-carousels.ts` -> `authFetch('/api/carousels')`
+- `hooks/use-collections.ts` -> `authFetch('/api/collections')`
+- `hooks/use-auto-save.ts` -> `authFetch('/api/carousels/{id}', {method:'PUT'})`
+- `app/(app)/gerador/page.tsx` -> `authFetch` para load/create
+
+**Etapa 4: Conectar 5 Botoes de IA**
+- Cada botao no `controls-panel.tsx` recebe onClick com: loading state, `authFetch` POST, parse JSON, `updateSlideDeep` no Zustand
+
+**Etapa 5: Modal de Legenda**
+- Novo `components/editor/caption/caption-modal.tsx`
+- POST `/api/generate` action `custom` com slides[]
+- Textarea editavel + "Copiar tudo" + "Regerar"
+
+**Etapa 6: Upload de Imagem Real**
+- File input + drag-and-drop na secao "Imagem de Fundo"
+- POST `/api/upload-image` com FormData
+- URL publica -> `slide.background.imageUrl`
+
+**Etapa 7: Wizard com Gemini Real**
+- `create-wizard.tsx` `handleGenerate()` faz loop de POST `/api/generate` para cada slide
+- Se "gerar imagens" ativado, tambem chama `/api/generate-image`
+
+### Arquivos a Modificar (13)
+
+```
+.env.local                                    Credenciais reais
+lib/supabase/middleware.ts                     Voltar Supabase auth
+lib/auth-fetch.ts                             Atualizar para Supabase session token
+components/providers/auth-provider.tsx         Voltar Supabase + user_settings
+app/(auth)/login/page.tsx                     signInWithPassword
+app/(auth)/register/page.tsx                  signUp + user_settings
+hooks/use-carousels.ts                        authFetch -> API
+hooks/use-collections.ts                      authFetch -> API
+hooks/use-auto-save.ts                        authFetch -> PUT API
+app/(app)/gerador/page.tsx                    authFetch load/create
+components/editor/controls/controls-panel.tsx  onClick nos 5 botoes IA + upload
+components/editor/caption/caption-modal.tsx    NOVO - modal legenda
+components/dashboard/create-wizard.tsx         Gemini real
+```
+
+### Verificacao Pos-Migracao
+
+1. Registrar usuario -> row em `auth.users` + `user_settings`
+2. Login -> sessao Supabase, middleware protege rotas
+3. Criar carrossel via wizard -> slides gerados pelo Gemini
+4. Editar no editor -> auto-save grava no Supabase
+5. Botao "Gerar conteudo" -> texto real do Gemini
+6. Botao "Refinar slide" -> slide refinado
+7. Upload imagem -> aparece no canvas
+8. "Gerar Legenda" -> legenda real com hashtags
+9. Pastas -> collections no Supabase
+10. Calendario -> ideias reais do Gemini
+- HTTPS obrigatorio para callbacks OAuth
